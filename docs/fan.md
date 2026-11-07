@@ -155,7 +155,7 @@ s2idle 不会让这颗 EC 进入 S3。`HOOK_CHIPSET_SUSPEND` 里那条“S3/S5 �
 
 给另一台同样的 Akali360 用。板子上仍是 stock Chrome EC：有 `PWM_SET_FAN_TARGET_RPM` 版本 0，没有 `PWM_GET_FAN_DUTY`，主机上能看到 `cros_ec_lpcs` 绑定的 `GOOG0004`。不刷固件，也不改 EC。
 
-在仓库根目录执行。脚本同时装上风扇桥和 `linux/s2idle/` 的睡眠修复。
+在仓库根目录执行。脚本同时装上风扇桥、`linux/s2idle/` 的睡眠修复、`linux/power/` 的功耗墙，以及 `linux/audio/` 的声卡配置。
 
 ```sh
 sudo sh linux/install-kubuntu.sh
@@ -168,6 +168,8 @@ sudo sh linux/install-kubuntu.sh
 - 安装 `akali-fan.service`，并 `enable`。它在 `systemd-udevd.service` 之后、`multi-user.target` 和 `coolercontrold.service` 之前执行 `modprobe akali_fan`。模块声明了 `softdep`，会先拉起 `cros_ec_lpcs`。绑定还没完成时，加载脚本最多再试大约 5 秒。
 - 删掉 `/etc/modules-load.d/akali_fan.conf`，避免开机早期那次加载失败把 `systemd-modules-load.service` 标成失败。
 - 安装并 enable `akali-s2idle.service`，把 `mem_sleep` 固定在 `s2idle`，并打开键盘和触摸板唤醒。
+- 安装并重启 `akali-pl1.service`，把两份 package 功耗墙写成 20W。
+- 安装 `linux/audio/` 的 UCM 和 WirePlumber 优先级，让扬声器和耳机压过 HDMI。
 
 这台 Kubuntu 26.10 的安全启动是关闭的。DKMS 会给模块签名，但固件没有登记那把密钥，内核日志里会有 `module verification failed`，模块仍然加载，内核被标记为 tainted。安全启动开着时，这条路没有验证过；未登记的模块会被拒绝。
 

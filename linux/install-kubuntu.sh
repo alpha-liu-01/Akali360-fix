@@ -37,6 +37,8 @@ systemctl enable akali-pl1.service
 # enable --now does not re-run a oneshot that is already active.
 systemctl restart akali-pl1.service
 
+sh "$ROOT/audio/install.sh"
+
 echo "==== boot ===="
 systemctl is-enabled akali-fan.service
 systemctl is-enabled akali-s2idle.service
@@ -63,3 +65,7 @@ echo "fan1_input=$(cat "$dir/fan1_input")"
 echo "pwm1=$(cat "$dir/pwm1")"
 echo "pwm1_enable=$(cat "$dir/pwm1_enable")"
 echo "temp1=$(cat "$dir/temp1_input") $(cat "$dir/temp1_label")"
+echo "==== audio ===="
+readlink -f /usr/share/alsa/ucm2/conf.d/avs_da7219/avs_da7219.conf
+readlink -f /usr/share/alsa/ucm2/conf.d/avs_max98357a/avs_max98357a.conf
+echo /etc/wireplumber/wireplumber.conf.d/akali-audio.conf
