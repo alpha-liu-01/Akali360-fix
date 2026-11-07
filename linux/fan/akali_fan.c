@@ -25,8 +25,19 @@ struct akali_fan {
 	struct cros_ec_device *ec;
 	struct mutex lock;
 	bool manual;
+	bool sleep_override;
 	u8 pwm;
 };
+
+/*
+ * Sleep override limits, in millicelsius, for Local, Remote1, Remote2.
+ * From nami EC e1bcde2e3, Akali tables thermal_d0/d1/d2. Local's fan table
+ * is already at RPM_MAX at 70°C and the EC halts the host at 81°C. Remote1
+ * and Remote2 warn at 59°C and do not move that fan table, so a hot remote
+ * sensor has to force full speed itself. The host is frozen for the whole
+ * sleep and cannot look again; below every limit the fan is stopped.
+ */
+static const long sleep_limit_mc[] = { 70000, 59000, 59000 };
 
 static struct akali_fan *akali_fan_get(struct device *dev)
 {
@@ -176,8 +187,10 @@ static int akali_fan_write(struct device *dev, enum hwmon_sensor_types type,
 	if (attr == hwmon_pwm_enable) {
 		if (val == 2) {
 			ret = ec_set_auto(fan->ec);
-			if (!ret)
+			if (!ret) {
 				fan->manual = false;
+				fan->sleep_override = false;
+			}
 		} else if (val == 1) {
 			long rpm = 0;
 
@@ -187,8 +200,10 @@ static int akali_fan_write(struct device *dev, enum hwmon_sensor_types type,
 				fan->pwm = rpm_to_pwm(rpm < 0 ? 0 : rpm);
 			}
 			ret = ec_set_rpm(fan->ec, pwm_to_rpm(fan->pwm));
-			if (!ret)
+			if (!ret) {
 				fan->manual = true;
+				fan->sleep_override = false;
+			}
 		} else {
 			ret = -EINVAL;
 		}
@@ -198,8 +213,10 @@ static int akali_fan_write(struct device *dev, enum hwmon_sensor_types type,
 		} else {
 			fan->pwm = val;
 			ret = ec_set_rpm(fan->ec, pwm_to_rpm(fan->pwm));
-			if (!ret)
+			if (!ret) {
 				fan->manual = true;
+				fan->sleep_override = false;
+			}
 		}
 	}
 	mutex_unlock(&fan->lock);
@@ -260,27 +277,75 @@ static int akali_fan_probe(struct platform_device *pdev)
 	return PTR_ERR_OR_ZERO(hwmon);
 }
 
+static bool sleep_is_hot(struct akali_fan *fan)
+{
+	int i;
+	bool any = false;
+
+	for (i = 0; i < 3; i++) {
+		long mc;
+		int ret = read_temp(fan->ec, i, &mc);
+
+		if (ret == -ENODATA)
+			continue;
+		if (ret)
+			return true;
+		any = true;
+		if (mc >= sleep_limit_mc[i])
+			return true;
+	}
+	return !any;
+}
+
 static int akali_fan_suspend(struct device *dev)
 {
 	struct akali_fan *fan = dev_get_drvdata(dev);
+	bool hot;
+	int ret;
 
-	if (!fan->manual)
-		return 0;
-	return ec_set_auto(fan->ec);
+	mutex_lock(&fan->lock);
+	hot = sleep_is_hot(fan);
+	ret = ec_set_rpm(fan->ec, hot ? RPM_MAX : 0);
+	if (!ret)
+		fan->sleep_override = true;
+	mutex_unlock(&fan->lock);
+	if (ret)
+		dev_warn(dev, "sleep fan override failed: %d\n", ret);
+	else
+		dev_info(dev, "sleep fan override: %s\n",
+			 hot ? "full speed" : "stopped");
+	if (hot && ret)
+		return ret;
+	return 0;
 }
 
 static int akali_fan_resume(struct device *dev)
 {
 	struct akali_fan *fan = dev_get_drvdata(dev);
+	int ret = 0;
 
-	if (!fan->manual)
-		return 0;
-	return ec_set_rpm(fan->ec, pwm_to_rpm(fan->pwm));
+	mutex_lock(&fan->lock);
+	if (fan->sleep_override) {
+		if (fan->manual)
+			ret = ec_set_rpm(fan->ec, pwm_to_rpm(fan->pwm));
+		else
+			ret = ec_set_auto(fan->ec);
+		if (!ret)
+			fan->sleep_override = false;
+	}
+	mutex_unlock(&fan->lock);
+	if (ret)
+		dev_warn(dev, "sleep fan restore failed: %d\n", ret);
+	return ret;
 }
 
 static const struct dev_pm_ops akali_fan_pm = {
 	.suspend = akali_fan_suspend,
 	.resume = akali_fan_resume,
+	.freeze = akali_fan_suspend,
+	.thaw = akali_fan_resume,
+	.poweroff = akali_fan_suspend,
+	.restore = akali_fan_resume,
 };
 
 static struct platform_driver akali_fan_driver = {
@@ -300,7 +365,9 @@ static int match_lpcs(struct device *dev, const void *data)
 
 static void akali_fan_restore(void)
 {
-	if (akali_fan_data.manual && akali_fan_data.ec)
+	if (!akali_fan_data.ec)
+		return;
+	if (akali_fan_data.manual || akali_fan_data.sleep_override)
 		ec_set_auto(akali_fan_data.ec);
 }
 
@@ -313,13 +380,16 @@ static int __init akali_fan_init(void)
 	if (!dev)
 		return -ENODEV;
 	akali_fan_data.ec = platform_get_drvdata(to_platform_device(dev));
-	put_device(dev);
-	if (!akali_fan_data.ec)
+	if (!akali_fan_data.ec) {
+		put_device(dev);
 		return -ENODEV;
+	}
 
 	ret = platform_driver_register(&akali_fan_driver);
-	if (ret)
+	if (ret) {
+		put_device(dev);
 		return ret;
+	}
 
 	akali_fan_dev = platform_device_register_simple("akali-fan",
 							 PLATFORM_DEVID_NONE,
@@ -327,8 +397,17 @@ static int __init akali_fan_init(void)
 	if (IS_ERR(akali_fan_dev)) {
 		ret = PTR_ERR(akali_fan_dev);
 		platform_driver_unregister(&akali_fan_driver);
+		put_device(dev);
 		return ret;
 	}
+	/*
+	 * Suspend the bridge before cros_ec_lpcs, and resume it after, so the
+	 * sleep override still has a live host command channel.
+	 */
+	if (!device_link_add(&akali_fan_dev->dev, dev,
+			     DL_FLAG_AUTOREMOVE_CONSUMER))
+		dev_warn(&akali_fan_dev->dev, "EC device link was not created\n");
+	put_device(dev);
 	return 0;
 }
 
@@ -344,3 +423,5 @@ module_exit(akali_fan_exit);
 
 MODULE_DESCRIPTION("Akali360 EC fan hwmon bridge");
 MODULE_LICENSE("GPL");
+/* The platform device is only visible after cros_ec_lpcs has bound. */
+MODULE_SOFTDEP("pre: cros_ec_lpcs");

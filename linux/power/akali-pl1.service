@@ -1,0 +1,12 @@
+[Unit]
+Description=Akali360 package power limit 20W
+After=thermald.service
+Before=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/akali-pl1.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

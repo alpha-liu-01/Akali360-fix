@@ -83,15 +83,24 @@ Remote1 的名字在 EC 里是 CPU 传感器，但它的风扇阈值被写成 0�
 | 1 | 2700 RPM |
 | 255 | 5500 RPM |
 
-中间按线性插值。写入 `pwm1` 会切到手动。把 `pwm1_enable` 写成 `2` 交还 EC 曲线。睡眠时模块先交还曲线，唤醒后如果之前是手动，再把目标写回去。卸载模块时也会交还曲线。
+中间按线性插值。写入 `pwm1` 会切到手动。把 `pwm1_enable` 写成 `2` 交还 EC 曲线。卸载模块时，如果当时是手动，或者睡眠覆盖还没交还，也会把曲线交还 EC。
 
-原来的 `cros_ec` hwmon 还在，它的 `fan1_input` 只读，没有 `pwm`。在 CoolerControl 里选名字是 `akali_fan` 的那一个。CPU 封装温度在 `coretemp` 上，曲线可以拿它做输入，风扇输出选 `akali_fan`。
+## 睡眠时停转
 
-在 Chromebook 上安装并加载：
+s2idle 不会让这颗 EC 进入 S3。`HOOK_CHIPSET_SUSPEND` 里那条“S3/S5 把风扇关掉”的路径不会走，所以风扇继续按 Local 曲线转。覆盖做在 `akali_fan` 的 suspend 回调里：入睡前读一次三颗 F75303，然后发一条转速命令。主机随后冻结，睡眠过程中不能再改。
 
-```sh
-sudo sh /home/user/akali-fan-bridge/install.sh
-```
+| 入睡前的温度 | 睡眠期间 |
+| --- | --- |
+| 三颗都低于各自的限 | 目标 0，停转 |
+| 任何一颗达到或超过限，或者温度读不出来 | 目标 5500 RPM |
+
+限来自这颗 EC 的 Akali 表：Local 70°C（风扇表的满转点，halt 是 81°C），Remote1 和 Remote2 都是 59°C（EC 的 warn；这两颗不推动风扇表，所以危险时不能只把曲线交还 EC）。当前日常温度在 35°C 到 40°C，会停转。
+
+醒来后按睡眠前的模式交还：手动就写回原来的 `pwm1`，否则 `THERMAL_AUTO_FAN_CTRL`。CoolerControl 的曲线因此还在。
+
+转速命令会关掉 EC 的风扇闭环，而且要到醒来才恢复。睡眠中途温度再升，风扇不会自己转回来。EC 的热保护还在，Local 到 81°C 仍会让主机关机，但它不会把风扇重新打开。危险判断只发生在入睡那一次。命令失败时，温度已经超限就取消这次睡眠；温度正常就让睡眠继续，风扇保持原来的转速。
+
+原来的 `cros_ec` hwmon 还在，它的 `fan1_input` 只读，没有 `pwm`。在 CoolerControl 里选名字是 `akali_fan` 的那一个。CPU 封装温度在 `coretemp` 上，曲线可以拿它做输入，风扇输出选 `akali_fan`。`hwmon` 的序号每次开机可能变，按名字选，不要按 `hwmonN`。
 
 ## 加载结果（postmarketOS，2026-11-07）
 
@@ -116,32 +125,76 @@ sudo sh /home/user/akali-fan-bridge/install.sh
 
 3101 RPM 按模块的映射是 `pwm1=37`，和读数一致。40.9°C 在 35°C 到 70°C 的曲线上大约是 3168 RPM，实测 3101，闭环仍按 Local 在转。
 
-这台 postmarketOS 上不打算用 CoolerControl。下一步会改成 Kubuntu，这块 USB 系统不再作为日常系统。`akali_fan.ko` 的 vermagic 是 `6.18.52-0-lts`，不能直接放进 Kubuntu 的内核。源码在 `linux/fan/akali_fan.c`，到 Kubuntu 上要按那个内核的 headers 重新编译。EC 命令和 `pwm1` 的转速映射不变。
+这台 postmarketOS 上不打算用 CoolerControl。USB 系统不再作为日常系统。`akali_fan.ko` 的 vermagic 是 `6.18.52-0-lts`，不能直接放进 Kubuntu 的内核。源码在 `linux/fan/akali_fan.c`，EC 命令和 `pwm1` 的转速映射不变。
 
-## 用法
+## 加载结果（Kubuntu，2026-11-07）
 
-在 Chromebook 上编译一次：
+内置磁盘上的 Kubuntu 26.10，内核 `7.3.0-9-generic`。CoolerControl 只能看到 `acpi_fan`（空）和 `cros_ec` 的只读 `fan1`，提示 `None of the detected fan or pump channels can be controlled`。`linux/install-kubuntu.sh` 用 DKMS 按这个内核重新编译并加载 `akali_fan`。当时 `pwm1_enable` 是 2，温度闭环还在 EC 手里。
+
+| 设备 | 名字 |
+| --- | --- |
+| `hwmon1` | `acpi_fan` |
+| `hwmon4` | `coretemp` |
+| `hwmon8` | `cros_ec` |
+| `hwmon9` | `akali_fan` |
+
+`akali_fan` 读数：
+
+| 文件 | 值 |
+| --- | --- |
+| `fan1_input` | 3212 RPM |
+| `pwm1` | 47 |
+| `pwm1_enable` | 2 |
+| `temp1` | 40850（40.9°C，`F75303_Local`） |
+
+3212 RPM 按 `1 + (rpm - 2700) * 254 / 2800` 是 `pwm1=47`，和读数一致。40.9°C 在曲线上大约是 3168 RPM，实测 3212，闭环仍按 Local 在转。CoolerControl 里选 `akali_fan`。`cros_ec` 仍然没有 `pwm`。这次安装时 CoolerControl 已经能对 `akali_fan` 的 `fan1` 套用曲线。
+
+这次安装先把 `akali_fan` 写进了 `/etc/modules-load.d/akali_fan.conf`。那个服务和 udev 并行，而模块的 `init` 只查找一次已经绑定的 `cros_ec_lpcs`，找不到就返回 `ENODEV`，不会再试。EC 驱动是模块，这台机器上 `GOOG0004:00` 在开机后大约 5.5 秒才注册。所以那一行不能保证下一次开机加载成功。安装脚本已经改掉，见下一节。
+
+## 在 Ubuntu 上部署
+
+给另一台同样的 Akali360 用。板子上仍是 stock Chrome EC：有 `PWM_SET_FAN_TARGET_RPM` 版本 0，没有 `PWM_GET_FAN_DUTY`，主机上能看到 `cros_ec_lpcs` 绑定的 `GOOG0004`。不刷固件，也不改 EC。
+
+在仓库根目录执行。脚本同时装上风扇桥和 `linux/s2idle/` 的睡眠修复。
 
 ```sh
-gcc -Wall -O2 -o /home/user/ec-fan /home/user/ec-fan.c
+sudo sh linux/install-kubuntu.sh
 ```
 
-只读，核对这颗 EC 实际宣布的版本：
+脚本做这几件事：
+
+- 安装 `build-essential`、`dkms` 和当前内核的 headers，按正在跑的内核编译 `akali_fan`。
+- 用 DKMS 登记 `akali-fan/1.0`，`AUTOINSTALL=yes`。以后这个系统升级内核时，`/etc/kernel/postinst.d/dkms` 会按新内核再编一次。
+- 安装 `akali-fan.service`，并 `enable`。它在 `systemd-udevd.service` 之后、`multi-user.target` 和 `coolercontrold.service` 之前执行 `modprobe akali_fan`。模块声明了 `softdep`，会先拉起 `cros_ec_lpcs`。绑定还没完成时，加载脚本最多再试大约 5 秒。
+- 删掉 `/etc/modules-load.d/akali_fan.conf`，避免开机早期那次加载失败把 `systemd-modules-load.service` 标成失败。
+- 安装并 enable `akali-s2idle.service`，把 `mem_sleep` 固定在 `s2idle`，并打开键盘和触摸板唤醒。
+
+这台 Kubuntu 26.10 的安全启动是关闭的。DKMS 会给模块签名，但固件没有登记那把密钥，内核日志里会有 `module verification failed`，模块仍然加载，内核被标记为 tainted。安全启动开着时，这条路没有验证过；未登记的模块会被拒绝。
+
+装完后核对：
 
 ```sh
-sudo /home/user/ec-fan status
+systemctl is-enabled akali-fan.service
+systemctl is-enabled akali-s2idle.service
+cat /sys/power/mem_sleep
+grep -l '^akali_fan$' /sys/class/hwmon/hwmon*/name
 ```
 
-把目标改成 3500 RPM。风扇声会离开当前曲线：
+`akali-fan.service` 和 `akali-s2idle.service` 都应该是 `enabled`。`mem_sleep` 应该是 `[s2idle] deep`。`hwmon` 里要有名字是 `akali_fan` 的设备，并且它有可写的 `pwm1`。
+
+开机之后模块自己的状态是 `pwm1_enable=2`，转速交还 EC 曲线。它不记住上次手动写过的转速。要让 CoolerControl 里画的曲线在开机后生效，需要 `coolercontrold.service` 也是 `enabled`。这台机器上它已经是 enabled，并且成功对 `akali_fan` 套用过曲线。服务顺序保证桥接先出现，CoolerControl 再写 `pwm`。睡眠时的停转是模块的 suspend 回调，不需要另外的服务；醒来会交还 CoolerControl 当时的手动目标，或者交还 EC 曲线。
+
+`linux/fan/install.sh` 和 `linux/fan/pin-abi.py` 是 postmarketOS 那次用的。前者要求旁边已经有对应当前内核的 `akali_fan.ko`，后者只用于 headers 和正在跑的内核版本不一致的时候。Ubuntu 上不要走这两条。
+
+## 命令行核对
+
+`linux/fan/ec-fan.c` 直接对 `/dev/cros_ec` 发那两条旧命令，用来核对 EC，不给 CoolerControl 用。上面的实机记录是在 postmarketOS 上跑的，路径是 `/home/user/ec-fan`。
 
 ```sh
-sudo /home/user/ec-fan set 3500
+gcc -Wall -O2 -o ec-fan linux/fan/ec-fan.c
+sudo ./ec-fan status
+sudo ./ec-fan set 3500
+sudo ./ec-fan auto
 ```
 
-交还 EC：
-
-```sh
-sudo /home/user/ec-fan auto
-```
-
-上面的实机记录里，`GET_FAN_DUTY` 已经是 unavailable，`SET_FAN_TARGET_RPM` 的 `version_mask` 是 `0x3`。内核自带的 `cros_ec` hwmon 因此没有 `pwm`。`akali_fan` 用的是已经验证过的那两条旧命令。
+`status` 核对版本。`set` 把目标改成 3500 RPM，风扇声会离开当前曲线。`auto` 交还 EC。`GET_FAN_DUTY` 已经是 unavailable，`SET_FAN_TARGET_RPM` 的 `version_mask` 是 `0x3`。内核自带的 `cros_ec` hwmon 因此没有 `pwm`。`akali_fan` 用的是已经验证过的那两条旧命令。

@@ -1,0 +1,12 @@
+[Unit]
+Description=Akali360 fan bridge
+After=systemd-udevd.service
+Before=multi-user.target coolercontrold.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/akali-fan-load.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

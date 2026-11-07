@@ -330,6 +330,10 @@ Akali 的风扇只看 Local，35°C 停转。38.9°C 到 35°C 是 3.9°C，整�
 
 19:18 GMT 安装之后，`mem_sleep` 是 `[s2idle] deep`，键盘和触摸板 wakeup 都是 `enabled`。键盘可以唤醒。19:21 GMT 这次睡眠的内核记录是 `suspend entry (s2idle)` 到 `suspend exit`：启动时钟走了 40.424 秒，墙上时钟走了 40.612 秒，`CLOCK_MONOTONIC` 只走了 2.078 秒。后一个时钟在 CPU 停进空闲时是停的，所以这 40 秒里大约 38 秒不在跑系统，是睡眠，不是只关屏幕。这次启动的 `suspend_stats` 是 `success=5`。
 
+同一套文件装到内置磁盘的 Kubuntu 26.10（内核 `7.3.0-9-generic`）之后，`mem_sleep` 是 `[s2idle] deep`。电源键、AT 键盘、Elan 触摸板的 wakeup 都是 `enabled`。`akali-s2idle.service` 是 `enabled`，开机进 multi-user 时会再写一次，每次睡眠前也会再写一次。这次还没有在 Kubuntu 上再睡一次。
+
+另一台 Ubuntu 或 Kubuntu 从仓库根目录执行 `sudo sh linux/install-kubuntu.sh`。这个脚本同时装上睡眠修复和风扇桥。风扇桥的开机加载方式写在 `docs/fan.md` 的部署一节。
+
 ## 下一步，按这个顺序
 
 这些步骤是调查，不是修复。前两步不刷机。离电那一次有较大概率把 USB 系统重启掉，先把日志落到另一台机器上。
