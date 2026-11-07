@@ -1,0 +1,13 @@
+[Unit]
+Description=Akali360 sleep uses s2idle, keyboard and touchpad can wake
+DefaultDependencies=no
+After=systemd-udevd.service
+Before=sleep.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/akali-s2idle.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target sleep.target
